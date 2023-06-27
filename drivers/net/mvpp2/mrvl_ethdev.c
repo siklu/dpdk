@@ -27,6 +27,7 @@
 #include "mrvl_flow.h"
 #include "mrvl_mtr.h"
 #include "mrvl_tm.h"
+#include "mrvl_ptp.h"
 
 /* bitmask with reserved hifs */
 #define MRVL_MUSDK_HIFS_RESERVED 0x0F
@@ -60,7 +61,8 @@
 /** Port Rx offload capabilities */
 #define MRVL_RX_OFFLOADS (DEV_RX_OFFLOAD_VLAN_FILTER | \
 			  DEV_RX_OFFLOAD_JUMBO_FRAME | \
-			  DEV_RX_OFFLOAD_CHECKSUM)
+			  DEV_RX_OFFLOAD_CHECKSUM | \
+			  DEV_RX_OFFLOAD_TIMESTAMP)
 
 /** Port Tx offloads capabilities */
 #define MRVL_TX_OFFLOAD_CHECKSUM (DEV_TX_OFFLOAD_IPV4_CKSUM | \
@@ -72,6 +74,18 @@
 #define MRVL_TX_PKT_OFFLOADS (PKT_TX_IP_CKSUM | \
 			      PKT_TX_TCP_CKSUM | \
 			      PKT_TX_UDP_CKSUM)
+
+/* enable timestamp in mbuf */
+static bool mrvl_enable_ts[RTE_MAX_ETHPORTS];
+static uint64_t mrvl_timestamp_rx_dynflag;
+static int mrvl_timestamp_dynfield_offset = -1;
+
+static inline rte_mbuf_timestamp_t *
+mrvl_timestamp_dynfield(struct rte_mbuf *mbuf)
+{
+	return RTE_MBUF_DYNFIELD(mbuf,
+		mrvl_timestamp_dynfield_offset, rte_mbuf_timestamp_t *);
+}
 
 static const char * const valid_args[] = {
 	MRVL_IFACE_NAME_ARG,
@@ -506,6 +520,16 @@ mrvl_dev_configure(struct rte_eth_dev *dev)
 				 priv->max_mtu);
 			return -EINVAL;
 		}
+	}
+
+	if (dev->data->dev_conf.rxmode.offloads & DEV_RX_OFFLOAD_TIMESTAMP) {
+		ret = rte_mbuf_dyn_rx_timestamp_register(&mrvl_timestamp_dynfield_offset,
+				&mrvl_timestamp_rx_dynflag);
+		if (ret != 0) {
+			MRVL_LOG(ERR, "Failed to register Rx timestamp field/flag");
+			return -1;
+		}
+		mrvl_enable_ts[dev->data->port_id] = true;
 	}
 
 	if (dev->data->dev_conf.txmode.offloads & DEV_TX_OFFLOAD_MULTI_SEGS)
@@ -1152,6 +1176,12 @@ mrvl_dev_close(struct rte_eth_dev *dev)
 		pp2_bpool_deinit(priv->bpool);
 		used_bpools[priv->pp_id] &= ~(1 << priv->bpool_bit);
 		priv->bpool = NULL;
+	}
+
+	if (priv->tai) {
+		mvpp2_cancel_phc_alarm(priv);
+		phc_close(priv->tai);
+		priv->tai = CLOCK_INVALID;
 	}
 
 	mrvl_dev_num--;
@@ -2654,6 +2684,19 @@ mrvl_rx_pkt_burst(void *rxq, struct rte_mbuf **rx_pkts, uint16_t nb_pkts)
 				mrvl_desc_to_ol_flags(&descs[i],
 						      mbuf->packet_type);
 
+		if (mrvl_enable_ts[mbuf->port] && (q->priv->tai != CLOCK_INVALID)) {
+			u32 timestamp =
+				rte_le_to_cpu_32(pp2_ppio_inq_desc_get_timestamp(&descs[i]));
+			if (mvpp22_tai_tstamp(q->priv->tai, timestamp,
+					mrvl_timestamp_dynfield(mbuf))) {
+				MRVL_LOG(ERR, "failed to convert pkt timestamp:0x%x", timestamp);
+			} else {
+				mbuf->ol_flags |= mrvl_timestamp_rx_dynflag;
+				MRVL_LOG(DEBUG, "pkt timestamp %u convert to %"PRIu64 " nsec\n",
+						timestamp, *mrvl_timestamp_dynfield(mbuf));
+			}
+		}
+
 		rx_pkts[rx_done++] = mbuf;
 		q->bytes_recv += mbuf->pkt_len;
 	}
@@ -3046,6 +3089,7 @@ mrvl_tx_sg_pkt_burst(void *txq, struct rte_mbuf **tx_pkts,
 	return nb_pkts;
 }
 
+
 /**
  * Create private device structure.
  *
@@ -3098,6 +3142,15 @@ mrvl_priv_create(const char *dev_name)
 
 	priv->ppio_params.type = PP2_PPIO_T_NIC;
 	rte_spinlock_init(&priv->lock);
+
+	if (sk_get_dev_phc(dev_name, &priv->tai)) {
+		MRVL_LOG(ERR, "failed to open TAI using Linux PHC");
+	} else {
+		int ret = mvpp2_schedule_phc_alarm(priv);
+		if (ret) {
+			MRVL_LOG(ERR, "failed to schedule get time from PHC");
+		}
+	}
 
 	return priv;
 out_clear_bpool_bit:

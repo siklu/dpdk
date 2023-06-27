@@ -146,6 +146,7 @@ struct mrvl_priv {
 	uint16_t bpool_max_size;  /**< BPool maximum size */
 	uint16_t bpool_min_size;  /**< BPool minimum size  */
 	uint16_t bpool_init_size; /**< Configured BPool size  */
+	clockid_t tai;            /**< Linux PHC id */
 
 	/** Mapping for DPDK rx queue->(TC, MRVL relative inq) */
 	struct {
@@ -186,6 +187,8 @@ struct mrvl_priv {
 
 	uint8_t forward_bad_frames;
 	uint32_t fill_bpool_buffs;
+
+	bool scheduled_get_time_alarm;
 
 	uint8_t configured; /** indicates if device has been configured */
 };
