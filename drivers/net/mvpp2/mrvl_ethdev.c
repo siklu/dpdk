@@ -73,19 +73,8 @@
 
 #define MRVL_TX_PKT_OFFLOADS (PKT_TX_IP_CKSUM | \
 			      PKT_TX_TCP_CKSUM | \
-			      PKT_TX_UDP_CKSUM)
-
-/* enable timestamp in mbuf */
-static bool mrvl_enable_ts[RTE_MAX_ETHPORTS];
-static uint64_t mrvl_timestamp_rx_dynflag;
-static int mrvl_timestamp_dynfield_offset = -1;
-
-static inline rte_mbuf_timestamp_t *
-mrvl_timestamp_dynfield(struct rte_mbuf *mbuf)
-{
-	return RTE_MBUF_DYNFIELD(mbuf,
-		mrvl_timestamp_dynfield_offset, rte_mbuf_timestamp_t *);
-}
+			      PKT_TX_UDP_CKSUM | \
+			      PKT_TX_IEEE1588_TMST)
 
 static const char * const valid_args[] = {
 	MRVL_IFACE_NAME_ARG,
@@ -129,16 +118,6 @@ struct mrvl_shadow_txq {
 			     * released
 			     */
 	struct buff_release_entry ent[MRVL_PP2_TX_SHADOWQ_SIZE]; /* q entries */
-};
-
-struct mrvl_rxq {
-	struct mrvl_priv *priv;
-	struct rte_mempool *mp;
-	int queue_id;
-	int port_id;
-	int cksum_enabled;
-	uint64_t bytes_recv;
-	uint64_t drop_mac;
 };
 
 struct mrvl_txq {
@@ -523,13 +502,9 @@ mrvl_dev_configure(struct rte_eth_dev *dev)
 	}
 
 	if (dev->data->dev_conf.rxmode.offloads & DEV_RX_OFFLOAD_TIMESTAMP) {
-		ret = rte_mbuf_dyn_rx_timestamp_register(&mrvl_timestamp_dynfield_offset,
-				&mrvl_timestamp_rx_dynflag);
-		if (ret != 0) {
-			MRVL_LOG(ERR, "Failed to register Rx timestamp field/flag");
+		if (!mvpp2_enable_rx_ts(dev->data->port_id)) {
 			return -1;
 		}
-		mrvl_enable_ts[dev->data->port_id] = true;
 	}
 
 	if (dev->data->dev_conf.txmode.offloads & DEV_TX_OFFLOAD_MULTI_SEGS)
@@ -677,6 +652,17 @@ mrvl_dev_set_link_up(struct rte_eth_dev *dev)
 		return ret;
 	}
 
+	if (priv->tai != CLOCK_INVALID) {
+		if (mvpp2_schedule_phc_alarm(priv)) {
+			MRVL_LOG(ERR, "%u-%u: failed to schedule PHC poll alarm",
+					priv->ppio->pp2_id, priv->ppio->port_id);
+		}
+		if (mvpp2_schedule_tx_ts_alarm(priv)) {
+			MRVL_LOG(ERR, "%u-%u: failed to schedule TX TS poll alarm",
+					priv->ppio->pp2_id, priv->ppio->port_id);
+		}
+	}
+
 	dev->data->dev_link.link_status = ETH_LINK_UP;
 	return 0;
 }
@@ -700,6 +686,12 @@ mrvl_dev_set_link_down(struct rte_eth_dev *dev)
 		dev->data->dev_link.link_status = ETH_LINK_DOWN;
 		return 0;
 	}
+
+	if (priv->tai != CLOCK_INVALID) {
+		mvpp2_cancel_tx_ts_alarm(priv);
+		mvpp2_cancel_phc_alarm(priv);
+	}
+
 	ret = pp2_ppio_disable(priv->ppio);
 	if (ret)
 		return ret;
@@ -1178,7 +1170,8 @@ mrvl_dev_close(struct rte_eth_dev *dev)
 		priv->bpool = NULL;
 	}
 
-	if (priv->tai) {
+	if (priv->tai != CLOCK_INVALID) {
+		mvpp2_cancel_tx_ts_alarm(priv);
 		mvpp2_cancel_phc_alarm(priv);
 		phc_close(priv->tai);
 		priv->tai = CLOCK_INVALID;
@@ -2684,17 +2677,8 @@ mrvl_rx_pkt_burst(void *rxq, struct rte_mbuf **rx_pkts, uint16_t nb_pkts)
 				mrvl_desc_to_ol_flags(&descs[i],
 						      mbuf->packet_type);
 
-		if (mrvl_enable_ts[mbuf->port] && (q->priv->tai != CLOCK_INVALID)) {
-			u32 timestamp =
-				rte_le_to_cpu_32(pp2_ppio_inq_desc_get_timestamp(&descs[i]));
-			if (mvpp22_tai_tstamp(q->priv->tai, timestamp,
-					mrvl_timestamp_dynfield(mbuf))) {
-				MRVL_LOG(ERR, "failed to convert pkt timestamp:0x%x", timestamp);
-			} else {
-				mbuf->ol_flags |= mrvl_timestamp_rx_dynflag;
-				MRVL_LOG(DEBUG, "pkt timestamp %u convert to %"PRIu64 " nsec\n",
-						timestamp, *mrvl_timestamp_dynfield(mbuf));
-			}
+		if (mvpp2_is_rx_ts_enabled(q)) {
+			mvpp2_read_rx_ts(q->priv, &descs[i], mbuf);
 		}
 
 		rx_pkts[rx_done++] = mbuf;
@@ -2914,6 +2898,9 @@ mrvl_tx_pkt_burst(void *txq, struct rte_mbuf **tx_pkts, uint16_t nb_pkts)
 		mrvl_fill_desc(&descs[i], mbuf);
 
 		bytes_sent += rte_pktmbuf_pkt_len(mbuf);
+
+		mvpp2_tx_hw_tstamp(q->priv, mbuf, &descs[i]);
+
 		/*
 		 * in case unsupported ol_flags were passed
 		 * do not update descriptor offload information
@@ -3051,6 +3038,9 @@ mrvl_tx_sg_pkt_burst(void *txq, struct rte_mbuf **tx_pkts,
 		mrvl_fill_desc(&descs[tail++], seg);
 
 		bytes_sent += rte_pktmbuf_pkt_len(mbuf);
+
+		mvpp2_tx_hw_tstamp(q->priv, mbuf, &descs[i]);
+
 		/* In case unsupported ol_flags were passed
 		 * do not update descriptor offload information
 		 */
@@ -3145,11 +3135,6 @@ mrvl_priv_create(const char *dev_name)
 
 	if (sk_get_dev_phc(dev_name, &priv->tai)) {
 		MRVL_LOG(ERR, "failed to open TAI using Linux PHC");
-	} else {
-		int ret = mvpp2_schedule_phc_alarm(priv);
-		if (ret) {
-			MRVL_LOG(ERR, "failed to schedule get time from PHC");
-		}
 	}
 
 	return priv;
