@@ -2677,7 +2677,7 @@ mrvl_rx_pkt_burst(void *rxq, struct rte_mbuf **rx_pkts, uint16_t nb_pkts)
 				mrvl_desc_to_ol_flags(&descs[i],
 						      mbuf->packet_type);
 
-		if (mvpp2_is_rx_ts_enabled(q)) {
+		if (unlikely(mvpp2_is_rx_ts_enabled(q))) {
 			mvpp2_read_rx_ts(q->priv, &descs[i], mbuf);
 		}
 

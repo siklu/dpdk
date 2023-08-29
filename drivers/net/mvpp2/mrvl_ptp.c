@@ -20,9 +20,10 @@
 /* enable timestamp in mbuf */
 static bool mrvl_enable_ts[RTE_MAX_ETHPORTS];
 static uint64_t mrvl_timestamp_rx_dynflag;
-int mrvl_timestamp_dynfield_offset = -1;
+static int mrvl_timestamp_dynfield_offset = -1;
 
-static rte_mbuf_timestamp_t *mrvl_timestamp_dynfield(struct rte_mbuf *mbuf)
+static inline rte_mbuf_timestamp_t *
+mrvl_timestamp_dynfield(struct rte_mbuf *mbuf)
 {
 	return RTE_MBUF_DYNFIELD(mbuf,
 		mrvl_timestamp_dynfield_offset, rte_mbuf_timestamp_t *);
@@ -39,9 +40,9 @@ bool mvpp2_enable_rx_ts(uint16_t port_id)
 	return true;
 }
 
-inline bool mvpp2_is_rx_ts_enabled(struct mrvl_rxq *q)
+bool mvpp2_is_rx_ts_enabled(struct mrvl_rxq *q)
 {
-	return unlikely(mrvl_enable_ts[q->port_id] && q->priv->tai != CLOCK_INVALID);
+	return mrvl_enable_ts[q->port_id] && q->priv->tai != CLOCK_INVALID;
 }
 
 clockid_t phc_open(const char *phc_dev_name)
@@ -172,7 +173,7 @@ int mvpp2_schedule_phc_alarm(struct mrvl_priv *priv)
 	int ret = rte_eal_alarm_set(2*US_PER_S, mvpp2_phc_get_current_time,
 			(void *)priv);
 	if (ret == 0) {
-		priv->scheduled_get_time_alarm;
+		priv->scheduled_get_time_alarm = true;
 	}
 	return ret;
 }
@@ -227,7 +228,7 @@ static inline void mvpp2_txdesc_clear_ptp(u32 *ptp_desc)
 	*ptp_desc &= rte_cpu_to_le_32(~MVPP22_PTP_DESC_MASK_LOW);
 }
 
-inline bool mvpp2_tx_hw_tstamp(
+bool mvpp2_tx_hw_tstamp(
     struct mrvl_priv *priv,
     struct rte_mbuf *mbuf,
     struct pp2_ppio_desc *tx_desc)
