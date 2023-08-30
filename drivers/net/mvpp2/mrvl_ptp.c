@@ -31,8 +31,9 @@ mrvl_timestamp_dynfield(struct rte_mbuf *mbuf)
 
 bool mvpp2_enable_rx_ts(uint16_t port_id)
 {
-	if (rte_mbuf_dyn_rx_timestamp_register(&mrvl_timestamp_dynfield_offset,
-				&mrvl_timestamp_rx_dynflag)) {
+	if (mrvl_timestamp_dynfield_offset < 0 &&
+	    rte_mbuf_dyn_rx_timestamp_register(&mrvl_timestamp_dynfield_offset,
+					       &mrvl_timestamp_rx_dynflag)) {
 		MRVL_LOG(ERR, "Failed to register Rx timestamp field/flag");
 		return false;
 	}
