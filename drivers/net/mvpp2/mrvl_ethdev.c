@@ -2677,7 +2677,7 @@ mrvl_rx_pkt_burst(void *rxq, struct rte_mbuf **rx_pkts, uint16_t nb_pkts)
 				mrvl_desc_to_ol_flags(&descs[i],
 						      mbuf->packet_type);
 
-		if (unlikely(mvpp2_is_rx_ts_enabled(q))) {
+		if (mvpp2_is_rx_ts_enabled(q)) {
 			mvpp2_read_rx_ts(q->priv, &descs[i], mbuf);
 		}
 
@@ -2899,7 +2899,10 @@ mrvl_tx_pkt_burst(void *txq, struct rte_mbuf **tx_pkts, uint16_t nb_pkts)
 
 		bytes_sent += rte_pktmbuf_pkt_len(mbuf);
 
-		mvpp2_tx_hw_tstamp(q->priv, mbuf, &descs[i]);
+		mvpp2_txdesc_clear_ptp(&descs[i]);
+		if (unlikely(mbuf->ol_flags & PKT_TX_IEEE1588_TMST)) {
+			mvpp2_tx_hw_tstamp(q->priv, mbuf, &descs[i]);
+		}
 
 		/*
 		 * in case unsupported ol_flags were passed
@@ -3039,7 +3042,10 @@ mrvl_tx_sg_pkt_burst(void *txq, struct rte_mbuf **tx_pkts,
 
 		bytes_sent += rte_pktmbuf_pkt_len(mbuf);
 
-		mvpp2_tx_hw_tstamp(q->priv, mbuf, &descs[i]);
+		mvpp2_txdesc_clear_ptp(&descs[i]);
+		if (unlikely(mbuf->ol_flags & PKT_TX_IEEE1588_TMST)) {
+			mvpp2_tx_hw_tstamp(q->priv, mbuf, &descs[i]);
+		}
 
 		/* In case unsupported ol_flags were passed
 		 * do not update descriptor offload information
