@@ -197,7 +197,7 @@ inline bool mvpp2_tx_hw_tstamp(
 	*buf_dma_addr_ptp |= rte_cpu_to_le_64((desc_val >> 12) << 40);
 
 	MRVL_LOG(DEBUG,
-		 "%u-%u TX TS[%u]: ptp_desc=0x%.8x dma_desc=0x%.16llx\n",
+		 "%u-%u TX TS[%u]: ptp_desc=0x%.8x dma_desc=0x%.16lx\n",
 		 priv->ppio->pp2_id, priv->ppio->port_id,
 		 it, *ptp_desc, *buf_dma_addr_ptp);
 
@@ -270,7 +270,7 @@ inline void mvpp2_read_rx_ts(
 				priv->ppio->pp2_id, priv->ppio->port_id, ts);
 	} else {
 		mbuf->ol_flags |= mrvl_timestamp_rx_dynflag;
-		MRVL_LOG(DEBUG, "%u-%u RX TS=%lu: convert to %llu nsec\n",
+		MRVL_LOG(DEBUG, "%u-%u RX TS=%u: convert to %lu nsec\n",
 			 priv->ppio->pp2_id, priv->ppio->port_id,
 			 ts, *mrvl_timestamp_dynfield(mbuf));
 	}

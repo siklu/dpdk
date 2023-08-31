@@ -198,7 +198,7 @@ static void mvpp2_isr_handle_ptp_queue(void *arg)
 				rte_spinlock_lock(&queue->lock);
 				lock_next = true;
 			} else {
-				MRVL_LOG(ERR, "%u-%u TX TS[%lu]=%lu: queue overrun!\n",
+				MRVL_LOG(ERR, "%u-%u TX TS[%u]=%u: queue overrun!\n",
 						priv->ppio->pp2_id, priv->ppio->port_id, it, ts);
 				continue;
 			}
@@ -210,16 +210,16 @@ static void mvpp2_isr_handle_ptp_queue(void *arg)
 			rte_spinlock_unlock(&queue->lock);
 		}
 		if (!mbuf) {
-			MRVL_LOG(ERR, "%u-%u TX TS[%lu]=%lu: queue slot is not valid!\n",
+			MRVL_LOG(ERR, "%u-%u TX TS[%u]=%u: queue slot is not valid!\n",
 					priv->ppio->pp2_id, priv->ppio->port_id, it, ts);
 			continue;
 		} else if (mvpp22_tai_tstamp(priv->tai, ts,
 					mrvl_timestamp_dynfield(mbuf))) {
-			MRVL_LOG(ERR, "%u-%u TX TS[%lu]=0x%.8x: failed to convert!",
+			MRVL_LOG(ERR, "%u-%u TX TS[%u]=0x%.8x: failed to convert!",
 					priv->ppio->pp2_id, priv->ppio->port_id, it, ts);
 		} else {
 			MRVL_LOG(DEBUG,
-					"%u-%u TX TS[%lu]=%lu: convert to %llu nsec\n",
+					"%u-%u TX TS[%u]=%u: convert to %lu nsec\n",
 					priv->ppio->pp2_id, priv->ppio->port_id,
 					it, ts, *mrvl_timestamp_dynfield(mbuf));
 		}
