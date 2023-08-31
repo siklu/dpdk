@@ -138,6 +138,12 @@ struct mrvl_tm_node {
 	uint64_t stats_mask;
 };
 
+struct mvpp2_hwtstamp_queue {
+	rte_spinlock_t lock;
+	u8 next; // iterator 0..31
+	struct rte_mbuf *mbuf[32];
+};
+
 struct mrvl_priv {
 	/* Hot fields, used in fast path. */
 	struct pp2_bpool *bpool;  /**< BPool pointer */
@@ -146,6 +152,8 @@ struct mrvl_priv {
 	uint16_t bpool_max_size;  /**< BPool maximum size */
 	uint16_t bpool_min_size;  /**< BPool minimum size  */
 	uint16_t bpool_init_size; /**< Configured BPool size  */
+	clockid_t tai;            /**< Linux PHC id */
+	struct mvpp2_hwtstamp_queue tx_hwtstamp_queue[2];
 
 	/** Mapping for DPDK rx queue->(TC, MRVL relative inq) */
 	struct {
@@ -187,7 +195,20 @@ struct mrvl_priv {
 	uint8_t forward_bad_frames;
 	uint32_t fill_bpool_buffs;
 
+	bool scheduled_get_time_alarm;
+	bool scheduled_get_tx_ts_alarm;
+
 	uint8_t configured; /** indicates if device has been configured */
+};
+
+struct mrvl_rxq {
+	struct mrvl_priv *priv;
+	struct rte_mempool *mp;
+	int queue_id;
+	int port_id;
+	int cksum_enabled;
+	uint64_t bytes_recv;
+	uint64_t drop_mac;
 };
 
 /** Flow operations forward declaration. */

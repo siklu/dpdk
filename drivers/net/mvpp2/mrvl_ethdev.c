@@ -27,6 +27,7 @@
 #include "mrvl_flow.h"
 #include "mrvl_mtr.h"
 #include "mrvl_tm.h"
+#include "mrvl_ptp.h"
 
 /* bitmask with reserved hifs */
 #define MRVL_MUSDK_HIFS_RESERVED 0x0F
@@ -60,7 +61,8 @@
 /** Port Rx offload capabilities */
 #define MRVL_RX_OFFLOADS (DEV_RX_OFFLOAD_VLAN_FILTER | \
 			  DEV_RX_OFFLOAD_JUMBO_FRAME | \
-			  DEV_RX_OFFLOAD_CHECKSUM)
+			  DEV_RX_OFFLOAD_CHECKSUM | \
+			  DEV_RX_OFFLOAD_TIMESTAMP)
 
 /** Port Tx offloads capabilities */
 #define MRVL_TX_OFFLOAD_CHECKSUM (DEV_TX_OFFLOAD_IPV4_CKSUM | \
@@ -71,7 +73,8 @@
 
 #define MRVL_TX_PKT_OFFLOADS (PKT_TX_IP_CKSUM | \
 			      PKT_TX_TCP_CKSUM | \
-			      PKT_TX_UDP_CKSUM)
+			      PKT_TX_UDP_CKSUM | \
+			      PKT_TX_IEEE1588_TMST)
 
 static const char * const valid_args[] = {
 	MRVL_IFACE_NAME_ARG,
@@ -115,16 +118,6 @@ struct mrvl_shadow_txq {
 			     * released
 			     */
 	struct buff_release_entry ent[MRVL_PP2_TX_SHADOWQ_SIZE]; /* q entries */
-};
-
-struct mrvl_rxq {
-	struct mrvl_priv *priv;
-	struct rte_mempool *mp;
-	int queue_id;
-	int port_id;
-	int cksum_enabled;
-	uint64_t bytes_recv;
-	uint64_t drop_mac;
 };
 
 struct mrvl_txq {
@@ -508,6 +501,12 @@ mrvl_dev_configure(struct rte_eth_dev *dev)
 		}
 	}
 
+	if (dev->data->dev_conf.rxmode.offloads & DEV_RX_OFFLOAD_TIMESTAMP) {
+		if (!mvpp2_enable_rx_ts(dev->data->port_id)) {
+			return -1;
+		}
+	}
+
 	if (dev->data->dev_conf.txmode.offloads & DEV_TX_OFFLOAD_MULTI_SEGS)
 		priv->multiseg = 1;
 
@@ -653,6 +652,17 @@ mrvl_dev_set_link_up(struct rte_eth_dev *dev)
 		return ret;
 	}
 
+	if (priv->tai != CLOCK_INVALID) {
+		if (mvpp2_schedule_phc_alarm(priv)) {
+			MRVL_LOG(ERR, "%u-%u: failed to schedule PHC poll alarm",
+					priv->ppio->pp2_id, priv->ppio->port_id);
+		}
+		if (mvpp2_schedule_tx_ts_alarm(priv)) {
+			MRVL_LOG(ERR, "%u-%u: failed to schedule TX TS poll alarm",
+					priv->ppio->pp2_id, priv->ppio->port_id);
+		}
+	}
+
 	dev->data->dev_link.link_status = ETH_LINK_UP;
 	return 0;
 }
@@ -676,6 +686,12 @@ mrvl_dev_set_link_down(struct rte_eth_dev *dev)
 		dev->data->dev_link.link_status = ETH_LINK_DOWN;
 		return 0;
 	}
+
+	if (priv->tai != CLOCK_INVALID) {
+		mvpp2_cancel_tx_ts_alarm(priv);
+		mvpp2_cancel_phc_alarm(priv);
+	}
+
 	ret = pp2_ppio_disable(priv->ppio);
 	if (ret)
 		return ret;
@@ -1152,6 +1168,13 @@ mrvl_dev_close(struct rte_eth_dev *dev)
 		pp2_bpool_deinit(priv->bpool);
 		used_bpools[priv->pp_id] &= ~(1 << priv->bpool_bit);
 		priv->bpool = NULL;
+	}
+
+	if (priv->tai != CLOCK_INVALID) {
+		mvpp2_cancel_tx_ts_alarm(priv);
+		mvpp2_cancel_phc_alarm(priv);
+		phc_close(priv->tai);
+		priv->tai = CLOCK_INVALID;
 	}
 
 	mrvl_dev_num--;
@@ -2654,6 +2677,10 @@ mrvl_rx_pkt_burst(void *rxq, struct rte_mbuf **rx_pkts, uint16_t nb_pkts)
 				mrvl_desc_to_ol_flags(&descs[i],
 						      mbuf->packet_type);
 
+		if (mvpp2_is_rx_ts_enabled(q)) {
+			mvpp2_read_rx_ts(q->priv, &descs[i], mbuf);
+		}
+
 		rx_pkts[rx_done++] = mbuf;
 		q->bytes_recv += mbuf->pkt_len;
 	}
@@ -2871,6 +2898,12 @@ mrvl_tx_pkt_burst(void *txq, struct rte_mbuf **tx_pkts, uint16_t nb_pkts)
 		mrvl_fill_desc(&descs[i], mbuf);
 
 		bytes_sent += rte_pktmbuf_pkt_len(mbuf);
+
+		mvpp2_txdesc_clear_ptp(&descs[i]);
+		if (unlikely(mbuf->ol_flags & PKT_TX_IEEE1588_TMST)) {
+			mvpp2_tx_hw_tstamp(q->priv, mbuf, &descs[i]);
+		}
+
 		/*
 		 * in case unsupported ol_flags were passed
 		 * do not update descriptor offload information
@@ -3008,6 +3041,12 @@ mrvl_tx_sg_pkt_burst(void *txq, struct rte_mbuf **tx_pkts,
 		mrvl_fill_desc(&descs[tail++], seg);
 
 		bytes_sent += rte_pktmbuf_pkt_len(mbuf);
+
+		mvpp2_txdesc_clear_ptp(&descs[i]);
+		if (unlikely(mbuf->ol_flags & PKT_TX_IEEE1588_TMST)) {
+			mvpp2_tx_hw_tstamp(q->priv, mbuf, &descs[i]);
+		}
+
 		/* In case unsupported ol_flags were passed
 		 * do not update descriptor offload information
 		 */
@@ -3045,6 +3084,7 @@ mrvl_tx_sg_pkt_burst(void *txq, struct rte_mbuf **tx_pkts,
 
 	return nb_pkts;
 }
+
 
 /**
  * Create private device structure.
@@ -3098,6 +3138,10 @@ mrvl_priv_create(const char *dev_name)
 
 	priv->ppio_params.type = PP2_PPIO_T_NIC;
 	rte_spinlock_init(&priv->lock);
+
+	if (sk_get_dev_phc(dev_name, &priv->tai)) {
+		MRVL_LOG(ERR, "failed to open TAI using Linux PHC");
+	}
 
 	return priv;
 out_clear_bpool_bit:
