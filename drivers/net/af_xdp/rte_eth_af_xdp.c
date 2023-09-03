@@ -282,7 +282,7 @@ af_xdp_rx_zc(void *queue, struct rte_mbuf **bufs, uint16_t nb_pkts)
 			(void)recvfrom(xsk_socket__fd(rxq->xsk), NULL, 0,
 				       MSG_DONTWAIT, NULL, NULL);
 		} else if (xsk_ring_prod__needs_wakeup(fq)) {
-			(void)poll(&rxq->fds[0], 1, 1000);
+			(void)poll(&rxq->fds[0], 1, 0);
 		}
 
 		return 0;
@@ -354,7 +354,7 @@ af_xdp_rx_cp(void *queue, struct rte_mbuf **bufs, uint16_t nb_pkts)
 	if (nb_pkts == 0) {
 #if defined(XDP_USE_NEED_WAKEUP)
 		if (xsk_ring_prod__needs_wakeup(fq))
-			(void)poll(rxq->fds, 1, 1000);
+			(void)poll(rxq->fds, 1, 0);
 #endif
 		return 0;
 	}
