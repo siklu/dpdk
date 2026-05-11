@@ -826,8 +826,23 @@ mrvl_dev_start(struct rte_eth_dev *dev)
 	int ret = 0, i, def_init_size;
 	struct rte_ether_addr *mac_addr;
 
-	if (priv->ppio)
-		return mrvl_dev_set_link_up(dev);
+	if (priv->ppio) {
+		int ret = mrvl_dev_set_link_up(dev);
+
+		if (ret == 0) {
+			/*
+			 * Refill BPool to its initial target after the stop-time
+			 * flush drained the in-flight descriptors back to mbufs.
+			 */
+			int cur = mrvl_get_bpool_size(
+					priv->bpool->pp2_id, priv->bpool->id);
+			int to_add = priv->bpool_init_size - cur;
+
+			if (to_add > 0)
+				mrvl_fill_bpool(dev->data->rx_queues[0], to_add);
+		}
+		return ret;
+	}
 
 	snprintf(match, sizeof(match), "ppio-%d:%d",
 		 priv->pp_id, priv->ppio_id);
@@ -1010,12 +1025,18 @@ mrvl_flush_rx_queues(struct rte_eth_dev *dev)
 		do {
 			struct mrvl_rxq *q = dev->data->rx_queues[i];
 			struct pp2_ppio_desc descs[MRVL_PP2_RXD_MAX];
+			int j;
 
 			num = MRVL_PP2_RXD_MAX;
 			ret = pp2_ppio_recv(q->priv->ppio,
 					    q->priv->rxq_map[q->queue_id].tc,
 					    q->priv->rxq_map[q->queue_id].inq,
 					    descs, (uint16_t *)&num);
+			for (j = 0; j < num; j++) {
+				uint64_t addr = cookie_addr_high |
+					pp2_ppio_inq_desc_get_cookie(&descs[j]);
+				rte_pktmbuf_free((struct rte_mbuf *)addr);
+			}
 		} while (ret == 0 && num);
 	}
 }
@@ -1106,6 +1127,13 @@ mrvl_flush_bpool(struct rte_eth_dev *dev)
 static int
 mrvl_dev_stop(struct rte_eth_dev *dev)
 {
+	struct mrvl_priv *priv = dev->data->dev_private;
+
+	if (priv->ppio) {
+		mrvl_flush_rx_queues(dev);
+		mrvl_flush_tx_shadow_queues(dev);
+	}
+
 	return mrvl_dev_set_link_down(dev);
 }
 
